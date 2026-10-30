@@ -1,0 +1,83 @@
+# Checks and builds every push and pull request. Pushing a tag like v1.0.0
+# also publishes a GitHub Release with the installers attached.
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet (all platforms)
+        run: |
+          GOOS=windows go vet ./...
+          GOOS=linux go vet ./...
+          GOOS=darwin go vet ./...
+
+      - name: Build
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="dev-${GITHUB_SHA::7}"
+          fi
+          make VERSION="$version"
+
+      # Every build can be downloaded from the run's page, handy for testing
+      # a pull request before it is released.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: installers
+          path: dist
+
+      - name: Checksums
+        run: cd dist && sha256sum etmapping-setup-* > SHA256SUMS
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease="--prerelease" # e.g. v1.1.0-rc1
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            $prerelease
